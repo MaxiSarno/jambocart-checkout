@@ -9,6 +9,20 @@ export interface PaymentMethod {
   reasons: string[]
 }
 
+export interface FullPaymentMethod {
+  id: string
+  name: string
+  type: 'mobile_money' | 'card' | 'bnpl' | 'bank_transfer' | 'wallet' | 'aggregator'
+  description: string
+  countries: string[]
+  currencies: string[]
+  authRate: number
+  avgProcessingSeconds: number
+  minAmount: number
+  maxAmount: number | null
+  popularOnMobile: boolean
+}
+
 export interface CheckoutContext {
   country: string
   currency: string

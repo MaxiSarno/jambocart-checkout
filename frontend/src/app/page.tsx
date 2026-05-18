@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Link from 'next/link'
 import { CheckoutContext, PaymentMethod } from '@/types/payment'
 import { rankPayments } from '@/lib/api'
 import ContextForm from '@/components/ContextForm'
@@ -70,8 +71,16 @@ export default function Home() {
               Smart checkout for Africa
             </span>
           </div>
-          <div className="text-xs text-gray-400 bg-gray-100 px-2.5 py-1 rounded-full font-medium">
-            v1.0 · beta
+          <div className="flex items-center gap-3">
+            <Link
+              href="/ab-test"
+              className="text-sm text-indigo-600 hover:text-indigo-800 font-semibold transition-colors"
+            >
+              A/B Simulator →
+            </Link>
+            <span className="text-xs text-gray-400 bg-gray-100 px-2.5 py-1 rounded-full font-medium">
+              v1.0 · beta
+            </span>
           </div>
         </div>
       </header>
