@@ -9,6 +9,8 @@ function supports(method, field, value) {
   return method[field].includes('*') || method[field].includes(value);
 }
 
+const AFRICAN_COUNTRIES = ['KE', 'UG', 'TZ', 'GH', 'CM'];
+
 // ── Signal scorers ────────────────────────────────────────────────────────────
 
 /**
@@ -19,7 +21,15 @@ function signalGeographic(method, country, currency) {
   if (!supports(method, 'countries', country) || !supports(method, 'currencies', currency)) {
     return null; // exclude
   }
-  return { points: 30, reasons: [] };
+  let points = 30;
+  const reasons = [];
+
+  if (method.type === 'card' && !AFRICAN_COUNTRIES.includes(country)) {
+    points += 15;
+    reasons.push('Preferred payment method internationally');
+  }
+
+  return { points, reasons };
 }
 
 /**
@@ -99,6 +109,26 @@ function signalAmount(method, { amountUSD, customerAge }) {
 }
 
 /**
+ * SIGNAL 4b — Processing speed
+ * -20 if transfer takes > 1 hour and amount < $1000 (SWIFT penalty on small purchases).
+ * +5 if payment settles in ≤ 10 seconds.
+ */
+function signalSpeed(method, amountUSD) {
+  let points = 0;
+  const reasons = [];
+
+  if (method.avgProcessingSeconds > 3600 && amountUSD < 1000) {
+    points -= 20;
+    reasons.push('Slow transfer — not ideal for this amount');
+  } else if (method.avgProcessingSeconds <= 10) {
+    points += 5;
+    reasons.push('Instant payment');
+  }
+
+  return { points, reasons };
+}
+
+/**
  * SIGNAL 5 — Authorization rate (variable pts)
  * bonus = Math.round((authRate − 0.70) × 100)
  */
@@ -144,15 +174,17 @@ function rankPaymentMethods(context) {
     // ── Remaining signals (no exclusions) ─────────────────────────────────────
     const history  = signalHistory(method, { isReturning, previousMethodId, country });
     const device   = signalDevice(method, deviceType);
+    const speed    = signalSpeed(method, amountUSD);
     const authRate = signalAuthRate(method);
 
-    const score = geo.points + history.points + device.points + amount.points + authRate.points;
+    const score = geo.points + history.points + device.points + amount.points + speed.points + authRate.points;
 
     const reasons = [
       ...geo.reasons,
       ...history.reasons,
       ...device.reasons,
       ...amount.reasons,
+      ...speed.reasons,
       ...authRate.reasons,
     ];
 
