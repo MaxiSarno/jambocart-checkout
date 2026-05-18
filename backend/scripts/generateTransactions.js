@@ -1,155 +1,141 @@
 /**
  * Generates 150 mock transactions and writes them to backend/data/transactions.js.
- * Run with: node backend/scripts/generateTransactions.js
+ * Run: node backend/scripts/generateTransactions.js
  */
 
-const fs = require('fs');
+'use strict';
+
+const fs   = require('fs');
 const path = require('path');
-const paymentMethods = require('../data/paymentMethods');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function pick(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
+function rand(min, max) { return Math.random() * (max - min) + min; }
+function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
-function randBetween(min, max) {
-  return Math.random() * (max - min) + min;
-}
-
-function randInt(min, max) {
-  return Math.floor(randBetween(min, max + 1));
-}
-
-// Weighted random: weights array must match items array length
 function weightedPick(items, weights) {
-  const total = weights.reduce((a, b) => a + b, 0);
-  let threshold = Math.random() * total;
+  let r = Math.random() * weights.reduce((a, b) => a + b, 0);
   for (let i = 0; i < items.length; i++) {
-    threshold -= weights[i];
-    if (threshold <= 0) return items[i];
+    r -= weights[i];
+    if (r <= 0) return items[i];
   }
   return items[items.length - 1];
 }
 
-function randomTimestamp(daysBack = 90) {
-  const now = Date.now();
-  const past = now - daysBack * 24 * 60 * 60 * 1000;
-  return new Date(randBetween(past, now)).toISOString();
+function isoTimestamp(daysAgo) {
+  return new Date(Date.now() - daysAgo * 86400000 - rand(0, 86400000)).toISOString();
 }
 
-// ── Country → currency map ────────────────────────────────────────────────────
+// ── Country pool — 60% KE, 15% UG, 10% TZ, 15% international ─────────────────
+const COUNTRY_POOL = [
+  ...Array(60).fill('KE'),
+  ...Array(15).fill('UG'),
+  ...Array(10).fill('TZ'),
+  ...Array(5).fill('US'),
+  ...Array(4).fill('GB'),
+  ...Array(3).fill('GH'),
+  ...Array(3).fill('NG'),
+];
 
-const countryCurrency = {
-  KE: 'KES', TZ: 'TZS', UG: 'UGX', RW: 'RWF', MZ: 'MZN',
-  GH: 'GHS', CM: 'XAF', CI: 'XOF', ZM: 'ZMW',
-  US: 'USD', GB: 'GBP', CA: 'CAD', AU: 'AUD', NZ: 'NZD',
-  DE: 'EUR', FR: 'EUR', ES: 'EUR', IT: 'EUR', NL: 'EUR',
-  BE: 'EUR', AT: 'EUR', PT: 'EUR', FI: 'EUR', IE: 'EUR',
-  SE: 'SEK', DK: 'DKK', NO: 'NOK',
-  BR: 'BRL', MX: 'MXN', AR: 'ARS',
-  IN: 'INR', JP: 'JPY', CN: 'CNY', HK: 'HKD', MO: 'MOP',
-  SG: 'SGD', MY: 'MYR', TH: 'THB', PH: 'PHP',
-  NG: 'NGN', ZA: 'ZAR', AE: 'AED',
+const COUNTRY_CURRENCY = {
+  KE: 'KES', UG: 'UGX', TZ: 'TZS',
+  US: 'USD', GB: 'GBP', GH: 'GHS', NG: 'NGN',
 };
 
-// ── Volume weights per method (simulates real-world adoption) ─────────────────
-// Higher weight = more transactions generated for that method
-const methodWeights = {
-  visa:        20,
-  mastercard:  18,
-  paypal:      15,
-  pix:         14,
-  mpesa:       12,
-  apple_pay:   10,
-  klarna:       8,
-  sepa:         8,
-  afterpay:     7,
-  alipay:       7,
-  mtn_momo:     6,
-  oxxo:         5,
+// ── Methods available per country ─────────────────────────────────────────────
+const METHODS_BY_COUNTRY = {
+  KE: ['mpesa', 'airtel_money', 'lipa_later', 'aspira', 'pesalink',
+       'equity_eazzy', 'pesapal', 'visa', 'mastercard', 'paypal', 'swift'],
+  UG: ['airtel_money', 'mtn_momo', 'pesapal', 'visa', 'mastercard', 'paypal', 'swift'],
+  TZ: ['airtel_money', 'pesapal', 'visa', 'mastercard', 'paypal', 'swift'],
+  US: ['visa', 'mastercard', 'paypal', 'swift'],
+  GB: ['visa', 'mastercard', 'paypal', 'swift'],
+  GH: ['mtn_momo', 'visa', 'mastercard', 'paypal', 'swift'],
+  NG: ['visa', 'mastercard', 'paypal', 'swift'],
 };
 
-// ── Amount distribution by method type ───────────────────────────────────────
-// Returns a realistic USD amount respecting the method's min/max
-function generateAmount(method) {
-  const { minAmount, maxAmount, type } = method;
-  // Use a skewed distribution: most transactions cluster at the lower end
-  const skewFactor = {
-    mobile_money:    0.15,
-    card:            0.30,
-    bnpl:            0.50,
-    bank_transfer:   0.60,
-    digital_wallet:  0.25,
-    instant_payment: 0.20,
-    cash_voucher:    0.10,
-  }[type] || 0.25;
+// Approval rates per method (match paymentMethods authRate)
+const AUTH_RATE = {
+  mpesa: 0.94, airtel_money: 0.89, mtn_momo: 0.91,
+  visa: 0.82, mastercard: 0.82,
+  lipa_later: 0.76, aspira: 0.73,
+  pesalink: 0.97, swift: 0.95,
+  paypal: 0.85, equity_eazzy: 0.93, pesapal: 0.86,
+};
 
-  const raw = minAmount + Math.pow(Math.random(), 1 - skewFactor) * (maxAmount - minAmount);
-  return parseFloat(raw.toFixed(2));
-}
+// Mobile preference per method
+const MOBILE_WEIGHT = {
+  mpesa: 0.95, airtel_money: 0.90, mtn_momo: 0.88,
+  lipa_later: 0.75, aspira: 0.70, paypal: 0.65, pesapal: 0.65,
+  equity_eazzy: 0.70, pesalink: 0.25,
+  visa: 0.30, mastercard: 0.30, swift: 0.10,
+};
 
-// ── Device type ───────────────────────────────────────────────────────────────
-function generateDeviceType(method) {
-  if (method.popularOnMobile) {
-    return weightedPick(['mobile', 'desktop', 'tablet'], [65, 25, 10]);
-  }
-  return weightedPick(['mobile', 'desktop', 'tablet'], [30, 60, 10]);
-}
-
-// ── Status (driven by authRate) ───────────────────────────────────────────────
-function generateStatus(method) {
+// ── Amount distribution — 30% <$50, 50% $50-$200, 20% >$200 ──────────────────
+function generateAmount() {
   const r = Math.random();
-  if (r < method.authRate) return 'success';
-  // Failed vs pending: ~80/20 split among non-success
-  return Math.random() < 0.8 ? 'failed' : 'pending';
+  if (r < 0.30) return parseFloat(rand(1, 49.99).toFixed(2));
+  if (r < 0.80) return parseFloat(rand(50, 200).toFixed(2));
+  return parseFloat(rand(201, 2000).toFixed(2));
 }
 
-// ── Generate transactions ─────────────────────────────────────────────────────
+// ── Customer pool (some returning) ────────────────────────────────────────────
+const CUSTOMER_COUNT = 80;
+const customerIds = Array.from({ length: CUSTOMER_COUNT }, (_, i) =>
+  `cust_${String(i + 1).padStart(3, '0')}`
+);
 
-const methodsById = Object.fromEntries(paymentMethods.map(m => [m.id, m]));
-const methodIds   = paymentMethods.map(m => m.id);
-const weights     = methodIds.map(id => methodWeights[id] || 5);
+// ── Generate ──────────────────────────────────────────────────────────────────
+const transactions = [];
 
-const transactions = Array.from({ length: 150 }, (_, i) => {
-  const methodId = weightedPick(methodIds, weights);
-  const method   = methodsById[methodId];
-  const country  = pick(method.countries);
-  const currency = countryCurrency[country] || method.currencies[0];
+for (let i = 0; i < 150; i++) {
+  const country    = pick(COUNTRY_POOL);
+  const currency   = COUNTRY_CURRENCY[country];
+  const methodId   = pick(METHODS_BY_COUNTRY[country]);
+  const mobileW    = MOBILE_WEIGHT[methodId] ?? 0.5;
+  const deviceType = Math.random() < mobileW ? 'mobile' : 'desktop';
+  const status     = Math.random() < (AUTH_RATE[methodId] ?? 0.85) ? 'approved' : 'declined';
+  const customerId = pick(customerIds);
 
-  return {
-    id:        `txn_${String(i + 1).padStart(4, '0')}`,
+  transactions.push({
+    id:         `txn_${String(i + 1).padStart(4, '0')}`,
     methodId,
     country,
     currency,
-    amountUSD: generateAmount(method),
-    deviceType: generateDeviceType(method),
-    status:    generateStatus(method),
-    timestamp: randomTimestamp(90),
-  };
-});
+    amountUSD:  generateAmount(),
+    deviceType,
+    status,
+    timestamp:  isoTimestamp(randInt(0, 89)),
+    customerId,
+  });
+}
 
-// Sort chronologically so the data feels natural
+// Sort chronologically
 transactions.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 
-// ── Write output ──────────────────────────────────────────────────────────────
+// ── Write ─────────────────────────────────────────────────────────────────────
+const out = path.join(__dirname, '../data/transactions.js');
+fs.writeFileSync(
+  out,
+  `// Auto-generated by scripts/generateTransactions.js — do not edit by hand\n` +
+  `const transactions = ${JSON.stringify(transactions, null, 2)};\n\nmodule.exports = transactions;\n`,
+  'utf8'
+);
 
-const outPath = path.join(__dirname, '../data/transactions.js');
-const content = `// Auto-generated by scripts/generateTransactions.js — do not edit by hand
-const transactions = ${JSON.stringify(transactions, null, 2)};
+// ── Summary ───────────────────────────────────────────────────────────────────
+const byStatus  = transactions.reduce((a, t) => { a[t.status] = (a[t.status] || 0) + 1; return a; }, {});
+const byCountry = transactions.reduce((a, t) => { a[t.country] = (a[t.country] || 0) + 1; return a; }, {});
+const byDevice  = transactions.reduce((a, t) => { a[t.deviceType] = (a[t.deviceType] || 0) + 1; return a; }, {});
 
-module.exports = transactions;
-`;
+const mpesaTxns   = transactions.filter(t => t.methodId === 'mpesa');
+const mpesaRate   = (mpesaTxns.filter(t => t.status === 'approved').length / mpesaTxns.length * 100).toFixed(1);
+const cardTxns    = transactions.filter(t => ['visa','mastercard'].includes(t.methodId));
+const cardRate    = (cardTxns.filter(t => t.status === 'approved').length / cardTxns.length * 100).toFixed(1);
 
-fs.writeFileSync(outPath, content, 'utf8');
-console.log(`Written ${transactions.length} transactions to ${outPath}`);
-
-// Quick sanity summary
-const byStatus = transactions.reduce((a, t) => { a[t.status] = (a[t.status] || 0) + 1; return a; }, {});
-const byType   = transactions.reduce((a, t) => {
-  const type = methodsById[t.methodId].type;
-  a[type] = (a[type] || 0) + 1;
-  return a;
-}, {});
-console.log('Status distribution:', byStatus);
-console.log('Type distribution:  ', byType);
+console.log(`Written ${transactions.length} transactions → ${out}`);
+console.log('Status :', byStatus);
+console.log('Country:', byCountry);
+console.log('Device :', byDevice);
+console.log(`M-PESA approval rate: ${mpesaRate}%  (target ~94%)`);
+console.log(`Cards  approval rate: ${cardRate}%  (target ~82%)`);

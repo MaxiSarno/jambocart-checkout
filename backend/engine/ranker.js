@@ -1,154 +1,184 @@
 'use strict';
 
-// ── Signal weights (no-history context) ───────────────────────────────────────
-// When a previousMethodId is present the weights shift to guarantee that method
-// ranks first (see WEIGHTS_WITH_HISTORY below).
-const WEIGHTS_DEFAULT = {
-  geographic: 0.35,
-  amount:     0.30,
-  device:     0.35,
-};
+const methods      = require('../data/paymentMethods');
+const transactions = require('../data/transactions');
 
-// With history: history alone (0.55) beats the maximum possible combined score
-// of all other signals (0.45), so the returning-customer method is always first.
-const WEIGHTS_WITH_HISTORY = {
-  geographic: 0.20,
-  amount:     0.15,
-  device:     0.10,
-  history:    0.55,
-};
+// ── Eligibility helpers ───────────────────────────────────────────────────────
 
-// ── Amount tier thresholds (USD) ──────────────────────────────────────────────
-// Calibrated against mock data: p25 ≈ $2.9k, p50 ≈ $15k, p75 ≈ $44k.
-// Tiers reflect method design intent, not data percentiles.
-const TIER_LOW_MAX  = 100;
-const TIER_MID_MAX  = 1000;
-// > 1000 → 'high'
-
-// Score (0–1) for each method type at each amount tier.
-// High score = this method is a strong fit for amounts in that tier.
-const AMOUNT_SCORES = {
-  mobile_money:    { low: 1.0, mid: 0.6, high: 0.2 },
-  card:            { low: 0.7, mid: 0.9, high: 1.0 },
-  bnpl:            { low: 0.2, mid: 1.0, high: 0.8 },
-  bank_transfer:   { low: 0.1, mid: 0.5, high: 1.0 },
-  digital_wallet:  { low: 0.8, mid: 0.9, high: 0.7 },
-  instant_payment: { low: 1.0, mid: 0.9, high: 0.5 },
-  cash_voucher:    { low: 0.9, mid: 0.7, high: 0.2 },
-};
-
-// Score (0–1) for each method type on each device.
-// Mobile money and digital wallets rank high on mobile; cards and bank
-// transfers rank high on desktop where form-filling is easier.
-const DEVICE_SCORES = {
-  mobile_money:    { mobile: 1.0, tablet: 0.6, desktop: 0.2 },
-  card:            { mobile: 0.5, tablet: 0.8, desktop: 1.0 },
-  bnpl:            { mobile: 0.8, tablet: 0.8, desktop: 0.7 },
-  bank_transfer:   { mobile: 0.2, tablet: 0.5, desktop: 1.0 },
-  digital_wallet:  { mobile: 1.0, tablet: 0.9, desktop: 0.7 },
-  instant_payment: { mobile: 0.9, tablet: 0.8, desktop: 0.7 },
-  cash_voucher:    { mobile: 0.5, tablet: 0.5, desktop: 0.6 },
-};
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function amountTier(amountUSD) {
-  if (amountUSD < TIER_LOW_MAX) return 'low';
-  if (amountUSD < TIER_MID_MAX) return 'mid';
-  return 'high';
-}
-
-function weightedSum(signals, weights) {
-  return Object.keys(weights).reduce(
-    (sum, key) => sum + (signals[key] ?? 0) * weights[key],
-    0
-  );
+function supports(method, field, value) {
+  return method[field].includes('*') || method[field].includes(value);
 }
 
 // ── Signal scorers ────────────────────────────────────────────────────────────
 
 /**
- * Returns raw success-transaction counts per method id for the given country.
- * Caller normalises by dividing by the max count.
+ * SIGNAL 1 — Geographic match (max 30 pts)
+ * Returns null to exclude the method when country or currency is unsupported.
  */
-function buildGeoCounts(eligibleMethods, country, transactions) {
-  const counts = new Map(eligibleMethods.map(m => [m.id, 0]));
-  for (const t of transactions) {
-    if (t.status === 'success' && t.country === country && counts.has(t.methodId)) {
-      counts.set(t.methodId, counts.get(t.methodId) + 1);
+function signalGeographic(method, country, currency) {
+  if (!supports(method, 'countries', country) || !supports(method, 'currencies', currency)) {
+    return null; // exclude
+  }
+  return { points: 30, reasons: [] };
+}
+
+/**
+ * SIGNAL 2 — Historical preference (max 50 pts)
+ * +50 if this is the customer's previous method.
+ * +15 if the method has > 10 approved transactions in this country (any customer).
+ */
+function signalHistory(method, { isReturning, previousMethodId, country }) {
+  let points  = 0;
+  const reasons = [];
+
+  if (isReturning && previousMethodId === method.id) {
+    points += 50;
+    reasons.push('Used in your last purchase');
+  } else if (isReturning) {
+    const approvedInCountry = transactions.filter(
+      t => t.methodId === method.id && t.country === country && t.status === 'approved'
+    ).length;
+    if (approvedInCountry > 10) {
+      points += 15;
+      reasons.push('Popular with returning customers in your region');
     }
   }
-  return counts;
+
+  return { points, reasons };
 }
 
-function scoreGeographic(rawCount, maxCount) {
-  return maxCount === 0 ? 0 : rawCount / maxCount;
+/**
+ * SIGNAL 3 — Device affinity (max 20 pts)
+ * +20 for mobile_money / wallet / aggregator on mobile.
+ * +10 for card on desktop.
+ */
+function signalDevice(method, deviceType) {
+  let points  = 0;
+  const reasons = [];
+
+  if (deviceType === 'mobile' && method.popularOnMobile) {
+    points += 20;
+    reasons.push('Optimised for mobile');
+  } else if (deviceType === 'desktop' && method.type === 'card') {
+    points += 10;
+    reasons.push('Great for desktop checkout');
+  }
+
+  return { points, reasons };
 }
 
-function scoreAmount(methodType, amountUSD) {
-  const tier = amountTier(amountUSD);
-  return AMOUNT_SCORES[methodType]?.[tier] ?? 0.5;
+/**
+ * SIGNAL 4 — Amount fit (max 25 pts)
+ * Returns null to exclude the method when amount is outside its limits.
+ * +25 for BNPL on amounts >= $100.
+ * +10 additional for BNPL when customerAge is "18-25".
+ * +10 for mobile_money or wallet on amounts < $50.
+ */
+function signalAmount(method, { amountUSD, customerAge }) {
+  if (amountUSD < method.minAmount) return null; // exclude
+  if (method.maxAmount !== null && amountUSD > method.maxAmount) return null; // exclude
+
+  let points  = 0;
+  const reasons = [];
+
+  if (method.type === 'bnpl' && amountUSD >= 100) {
+    points += 25;
+    reasons.push('Split into instalments at no extra cost');
+    if (customerAge === '18-25') {
+      points += 10;
+      reasons.push('Popular with young shoppers');
+    }
+  }
+
+  if (amountUSD < 50 && (method.type === 'mobile_money' || method.type === 'wallet')) {
+    points += 10;
+    reasons.push('Fast and fee-free for small amounts');
+  }
+
+  return { points, reasons };
 }
 
-function scoreDevice(methodType, deviceType) {
-  return DEVICE_SCORES[methodType]?.[deviceType] ?? 0.5;
-}
-
-function scoreHistory(methodId, previousMethodId) {
-  return previousMethodId && methodId === previousMethodId ? 1.0 : 0.0;
+/**
+ * SIGNAL 5 — Authorization rate (variable pts)
+ * bonus = Math.round((authRate − 0.70) × 100)
+ */
+function signalAuthRate(method) {
+  const points  = Math.max(0, Math.round((method.authRate - 0.70) * 100));
+  const reasons = [`${Math.round(method.authRate * 100)}% approval rate`];
+  return { points, reasons };
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * rank(context, methods, transactions) → RankedResult[]
+ * rankPaymentMethods(context) → RankedResult[]
  *
- * context:
- *   country          {string}  ISO 3166-1 alpha-2 (e.g. 'BR')
- *   amountUSD        {number}  transaction amount in USD
- *   deviceType       {string}  'mobile' | 'tablet' | 'desktop'
- *   previousMethodId {string?} method id used on last successful purchase
+ * context: {
+ *   country         string   ISO 3166-1 alpha-2 (e.g. "KE")
+ *   currency        string   ISO 4217 (e.g. "KES")
+ *   deviceType      string   "mobile" | "desktop"
+ *   amountUSD       number
+ *   isReturning     boolean
+ *   previousMethodId string? method id from last purchase
+ *   customerAge     string?  "18-25" | "26-40" | "41+"
+ * }
  *
- * Returns an array sorted by score desc, each item:
- *   { method, score, signals: { geographic, amount, device, history? } }
+ * Returns array sorted by score desc:
+ * { rank, id, name, type, description, score, confidence, reasons }
  */
-function rank(context, methods, transactions) {
-  const { country, amountUSD, deviceType, previousMethodId = null } = context;
+function rankPaymentMethods(context) {
+  const { country, currency, deviceType, amountUSD, isReturning,
+          previousMethodId, customerAge } = context;
 
-  // ── 1. Eligibility: country supported AND amount within method limits ───────
-  const eligible = methods.filter(
-    m => m.countries.includes(country) &&
-         amountUSD >= m.minAmount &&
-         amountUSD <= m.maxAmount
-  );
+  const results = [];
 
-  if (eligible.length === 0) return [];
+  for (const method of methods) {
+    // ── Signal 1: geographic eligibility ──────────────────────────────────────
+    const geo = signalGeographic(method, country, currency);
+    if (geo === null) continue;
 
-  // ── 2. Geographic signal — normalise across eligible methods ───────────────
-  const geoCounts = buildGeoCounts(eligible, country, transactions);
-  const maxGeoCount = Math.max(...geoCounts.values(), 1);
+    // ── Signal 4: amount eligibility (also excludes out-of-range) ─────────────
+    const amount = signalAmount(method, { amountUSD, customerAge });
+    if (amount === null) continue;
 
-  // ── 3. Choose weight set ───────────────────────────────────────────────────
-  const weights = previousMethodId ? WEIGHTS_WITH_HISTORY : WEIGHTS_DEFAULT;
+    // ── Remaining signals (no exclusions) ─────────────────────────────────────
+    const history  = signalHistory(method, { isReturning, previousMethodId, country });
+    const device   = signalDevice(method, deviceType);
+    const authRate = signalAuthRate(method);
 
-  // ── 4. Score ───────────────────────────────────────────────────────────────
-  const scored = eligible.map(m => {
-    const signals = {
-      geographic: scoreGeographic(geoCounts.get(m.id), maxGeoCount),
-      amount:     scoreAmount(m.type, amountUSD),
-      device:     scoreDevice(m.type, deviceType),
-      ...(previousMethodId && { history: scoreHistory(m.id, previousMethodId) }),
-    };
+    const score = geo.points + history.points + device.points + amount.points + authRate.points;
 
-    return {
-      method:  m,
-      score:   parseFloat(weightedSum(signals, weights).toFixed(4)),
-      signals,
-    };
-  });
+    const reasons = [
+      ...geo.reasons,
+      ...history.reasons,
+      ...device.reasons,
+      ...amount.reasons,
+      ...authRate.reasons,
+    ];
 
-  // ── 5. Sort descending ─────────────────────────────────────────────────────
-  return scored.sort((a, b) => b.score - a.score);
+    results.push({
+      id:          method.id,
+      name:        method.name,
+      type:        method.type,
+      description: method.description,
+      score,
+      reasons,
+    });
+  }
+
+  // Sort descending, then assign rank and confidence
+  results.sort((a, b) => b.score - a.score);
+
+  return results.map((r, i) => ({
+    rank:        i + 1,
+    id:          r.id,
+    name:        r.name,
+    type:        r.type,
+    description: r.description,
+    score:       r.score,
+    confidence:  Math.min(100, Math.round(r.score / 120 * 100)),
+    reasons:     r.reasons,
+  }));
 }
 
-module.exports = { rank };
+module.exports = { rankPaymentMethods };
