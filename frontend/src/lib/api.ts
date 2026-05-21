@@ -1,4 +1,4 @@
-import { CheckoutContext, FullPaymentMethod, PaymentMethod } from '@/types/payment'
+import { AnalyticsData, CheckoutContext, FullPaymentMethod, PaymentMethod } from '@/types/payment'
 
 const API_URL = 'http://localhost:4000'
 
@@ -23,4 +23,10 @@ export async function getMethods(): Promise<FullPaymentMethod[]> {
   if (!res.ok) throw new Error(`Server error ${res.status}`)
   const data = await res.json()
   return data.methods as FullPaymentMethod[]
+}
+
+export async function getAnalytics(): Promise<AnalyticsData> {
+  const res = await fetch(`${API_URL}/api/analytics`)
+  if (!res.ok) throw new Error(`Server error ${res.status}`)
+  return res.json() as Promise<AnalyticsData>
 }

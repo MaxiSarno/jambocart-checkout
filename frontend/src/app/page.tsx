@@ -78,6 +78,12 @@ export default function Home() {
             >
               A/B Simulator →
             </Link>
+            <Link
+              href="/admin"
+              className="text-sm text-indigo-600 hover:text-indigo-800 font-semibold transition-colors"
+            >
+              Admin Dashboard →
+            </Link>
             <span className="text-xs text-gray-400 bg-gray-100 px-2.5 py-1 rounded-full font-medium">
               v1.0 · beta
             </span>

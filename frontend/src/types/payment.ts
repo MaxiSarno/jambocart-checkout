@@ -31,4 +31,44 @@ export interface CheckoutContext {
   isReturning: boolean
   previousMethodId: string
   customerAge: '18-25' | '26-40' | '41+'
+  boosts?: Record<string, number | 'suppressed'>
+}
+
+// ── Analytics types ───────────────────────────────────────────────────────────
+
+export interface SignalStat {
+  signal: string
+  conversions: number
+  avgScore: number
+  description: string
+}
+
+export interface CountryMethodStat {
+  methodId: string
+  name: string
+  type: PaymentMethod['type']
+  approvalRate: number
+  volume: number
+}
+
+export interface MethodStat {
+  id: string
+  name: string
+  type: PaymentMethod['type']
+  volume: number
+  approvalRate: number
+  avgAmount: number
+  trend: 'up' | 'down' | 'stable'
+}
+
+export interface AnalyticsData {
+  signalPerformance: SignalStat[]
+  methodsByCountry: Record<string, CountryMethodStat[]>
+  overallStats: {
+    totalTransactions: number
+    approvalRate: number
+    topMethod: string
+    avgAmount: number
+  }
+  methodStats: MethodStat[]
 }

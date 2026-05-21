@@ -177,7 +177,7 @@ function rankPaymentMethods(context) {
     const speed    = signalSpeed(method, amountUSD);
     const authRate = signalAuthRate(method);
 
-    const score = geo.points + history.points + device.points + amount.points + speed.points + authRate.points;
+    let score = geo.points + history.points + device.points + amount.points + speed.points + authRate.points;
 
     const reasons = [
       ...geo.reasons,
@@ -187,6 +187,18 @@ function rankPaymentMethods(context) {
       ...speed.reasons,
       ...authRate.reasons,
     ];
+
+    // ── Merchant boosts ────────────────────────────────────────────────────────
+    if (context.boosts) {
+      const boost = context.boosts[method.id];
+      if (boost === 'suppressed') continue;
+      if (typeof boost === 'number' && boost !== 0) {
+        score += boost;
+        reasons.push(boost > 0
+          ? `Promoted by merchant (+${boost} pts)`
+          : `Demoted by merchant (${boost} pts)`);
+      }
+    }
 
     results.push({
       id:          method.id,
