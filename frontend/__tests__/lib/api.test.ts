@@ -1,4 +1,4 @@
-import { rankPayments, getMethods } from '@/lib/api'
+import { rankPayments, getMethods, getAnalytics } from '@/lib/api'
 import { CheckoutContext } from '@/types/payment'
 
 const mockFetch = jest.fn()
@@ -81,5 +81,33 @@ describe('getMethods', () => {
   test('throws a generic error with status code when response is not ok', async () => {
     mockFetch.mockResolvedValueOnce({ ok: false, status: 404 })
     await expect(getMethods()).rejects.toThrow('Server error 404')
+  })
+})
+
+// ── getAnalytics ──────────────────────────────────────────────────────────────
+
+const ANALYTICS_RESPONSE = {
+  overallStats: { totalTransactions: 150, approvalRate: 87.5, topMethod: 'M-PESA', avgAmount: 42.5 },
+  signalPerformance: [],
+  methodsByCountry: {},
+  methodStats: [],
+}
+
+describe('getAnalytics', () => {
+  test('sends GET to /api/analytics', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ANALYTICS_RESPONSE })
+    await getAnalytics()
+    expect(mockFetch).toHaveBeenCalledWith('http://localhost:4000/api/analytics')
+  })
+
+  test('returns the full analytics payload', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ANALYTICS_RESPONSE })
+    const result = await getAnalytics()
+    expect(result).toEqual(ANALYTICS_RESPONSE)
+  })
+
+  test('throws a generic error with status code when response is not ok', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503 })
+    await expect(getAnalytics()).rejects.toThrow('Server error 503')
   })
 })
